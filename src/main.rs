@@ -6,9 +6,7 @@ use tokio;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    let services = server::Services::new();
-
-    match server::start_server(services).await {
+    match server::start_server().await {
         Ok(_) => (),
         Err(_) => ()
     }

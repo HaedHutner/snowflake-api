@@ -5,29 +5,27 @@ use redis::{self, AsyncCommands};
 use crate::config::Config as SnowflakeConfig;
 
 pub(crate) struct SnowflakeGenerator {
-    config: SnowflakeConfig,
-    redis_client: RedisClient
 }
 
-impl SnowflakeGenerator{
-    pub(crate) fn new(config: SnowflakeConfig, redis_client: RedisClient) -> Self {
+impl SnowflakeGenerator {
+    pub(crate) fn new() -> Self {
         SnowflakeGenerator {
-            config,
-            redis_client
         }
     }
 
-    pub async fn generate_new(&self) -> Result<i64, SnowflakeError> {
+    pub async fn generate_new(&self, config: &SnowflakeConfig, redis: &SequenceTracker
+    ) -> Result<i64, SnowflakeError> {
         let time = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards??").as_millis();
 
-        match self.fetch_sequence(self.config.machine_id, time).await {
-            Ok(result) => Ok(((time << (64 - 42)) as i64) | (self.config.machine_id as i64) << (64 - (42 + 10)) | result),
+        match self.fetch_sequence(redis, config.machine_id, time).await {
+            Ok(result) => Ok(((time << (64 - 42)) as i64) | (config.machine_id as i64) << (64 - (42 + 10)) | result),
             Err(e) => Err(SnowflakeError::new("Couldn't generate snowflake id", Box::from(e)))
         }
     }
 
-    async fn fetch_sequence(&self, machine_id: u16, unix_millis: u128) -> Result<i64, SnowflakeError> {
-        match self.redis_client.get_sequence(machine_id, unix_millis).await {
+    async fn fetch_sequence(&self, redis: &SequenceTracker
+        , machine_id: u16, unix_millis: u128) -> Result<i64, SnowflakeError> {
+        match redis.get_sequence(machine_id, unix_millis).await {
             Ok(result) => Ok(result as i64),
             Err(e) => Err(e)
         }
@@ -66,19 +64,34 @@ impl Display for SnowflakeError {
     }
 }
 
-pub(crate) struct RedisClient {
-    redis: redis::Client
+pub(crate) struct SequenceTracker {
+    redis: Option<redis::Client>,
 }
 
-impl RedisClient {
+impl SequenceTracker {
     pub(crate) fn new(config: &SnowflakeConfig) -> Self {
-        RedisClient {
-            redis: redis::Client::open(config.redis_connection_string.as_str()).unwrap()
+        SequenceTracker
+         {
+            redis: {
+                match &config.redis_connection_string {
+                    None => Option::None,
+                    Some(val) => Option::from(redis::Client::open(val.as_str()).unwrap())
+                }
+            }
         }
     }
 
     async fn get_sequence(&self, machine_id: u16, unix_millis: u128) -> Result<u16, SnowflakeError> {
-        match self.redis.get_async_connection().await {
+        match &self.redis {
+            Some(client) => Self::fetch_sequence_from_redis(&client, machine_id, unix_millis).await,
+            None => {
+                Ok(0u16) // todo: need a way to keep track of the sequence relative to the time
+            }
+        }
+    }
+
+    async fn fetch_sequence_from_redis(client: &redis::Client, machine_id: u16, unix_millis: u128) -> Result<u16, SnowflakeError> {
+        match client.get_async_connection().await {
             Ok(mut conn) => {
                 let key = format!("{unix_millis}_{machine_id}");
 
